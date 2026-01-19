@@ -10,6 +10,8 @@ set -euo pipefail
 
 # --- Inputs ---
 QEMU_VERSION="${QEMU_VERSION:-10.0.2}"
+QEMU_GIT_URL="${QEMU_GIT_URL:-https://github.com/wasdwasd0105/qemu-android.git}"
+QEMU_GIT_REF="qemu-10.0.2"
 APP_ABI="${APP_ABI:-arm64-v8a}"
 BUILD_ROOT="${BUILD_ROOT:-$(pwd)/build}"
 QEMU_SRC="${QEMU_SRC:-$BUILD_ROOT/qemu-${QEMU_VERSION}}"
@@ -56,20 +58,23 @@ export LDFLAGS="-L$PREFIX/lib -Wl,--export-dynamic"
 HOST_CC="${HOST_CC:-$(command -v cc || true)}"
 [ -n "$HOST_CC" ] || { echo "No native host C compiler found."; exit 1; }
 
-# --- Ensure source exists (download if missing) ---
+# --- Ensure source exists (clone from GitHub if missing) ---
 mkdir -p "$BUILD_ROOT"
 if [ ! -d "$QEMU_SRC" ]; then
-  echo "==> Fetching QEMU sources $QEMU_VERSION into $BUILD_ROOT ..."
-  parent_dir="$(dirname "$QEMU_SRC")"
-  mkdir -p "$parent_dir"
-  pushd "$parent_dir" >/dev/null
-  tarball="qemu-${QEMU_VERSION}.tar.xz"
-  [ -f "$tarball" ] || curl -fL -o "$tarball" "https://download.qemu.org/qemu-${QEMU_VERSION}.tar.xz"
-  tar xf "$tarball"
-  if [ "$QEMU_SRC" != "$(pwd)/qemu-${QEMU_VERSION}" ]; then
-    mv "qemu-${QEMU_VERSION}" "$QEMU_SRC"
+  echo "==> Cloning QEMU sources from GitHub ($QEMU_GIT_URL) ref=$QEMU_GIT_REF into $QEMU_SRC ..."
+  git clone --depth 1 --branch "$QEMU_GIT_REF" "$QEMU_GIT_URL" "$QEMU_SRC"
+else
+  # If the dir exists, optionally ensure it's on the requested ref.
+  if [ -d "$QEMU_SRC/.git" ]; then
+    echo "==> Updating existing QEMU git checkout in $QEMU_SRC (ref=$QEMU_GIT_REF) ..."
+    pushd "$QEMU_SRC" >/dev/null
+    git fetch --tags --prune origin || true
+    git checkout -f "$QEMU_GIT_REF" || true
+    #git submodule update --init --recursive || true
+    popd >/dev/null
+  else
+    echo "==> Using existing QEMU source directory (not a git repo): $QEMU_SRC"
   fi
-  popd >/dev/null
 fi
 
 # --- Android-specific src tweaks ---
