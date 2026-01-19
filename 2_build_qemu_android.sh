@@ -49,7 +49,7 @@ export PKG_CONFIG="$WRAP_PC"
 
 # --- Compiler & Linker Flags (Android-safe) ---
 # Export ALL symbols from executables' .dynsym and avoid hidden defaults.
-export CFLAGS="-fPIC -fvisibility=default -I$PREFIX/include -DSDL_MAIN_HANDLED -I$PREFIX/include/pixman-1"
+export CFLAGS="-fPIC -fvisibility=default -Wno-error -I$PREFIX/include -DSDL_MAIN_HANDLED -I$PREFIX/include/pixman-1"
 export CPPFLAGS="$CFLAGS"
 # -Wl,--export-dynamic ensures the executable exposes all global symbols in .dynsym
 export LDFLAGS="-L$PREFIX/lib -Wl,--export-dynamic"
