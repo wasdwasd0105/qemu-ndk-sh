@@ -10,6 +10,8 @@ BUILD_ROOT="${BUILD_ROOT:-$(pwd)/build}"
 SYSROOT="${SYSROOT:-$BUILD_ROOT/sysroot-${ABI}}"
 SYS_LIB="$SYSROOT/lib"
 SYS_BIN="$SYSROOT/bin"
+JNI_LIB_DIR="$SYSROOT/jniLibs/$ABI"
+QEMU_SYSTEM_SO_X86_64_SRC="$JNI_LIB_DIR/libqemu-system-x86_64.so"
 
 DEST_ROOT="./opt/qemu/${ABI}"
 BIN_OUT="$DEST_ROOT/bin"
@@ -43,7 +45,15 @@ copy_lib "$SYS_LIB/libpixman-1.so"      "$LIB_OUT/libpixman-1.so"
 [ -f "$SYS_LIB/libgthread-2.0.so.0" ] && copy_lib "$SYS_LIB/libgthread-2.0.so.0" "$LIB_OUT/libgthread-2.0.so"
 [ -f "$SYS_LIB/libffi.so" ]           && copy_lib "$SYS_LIB/libffi.so"           "$LIB_OUT/libffi.so"
 
-# 2) Copy QEMU system executables into bin (no libqemu-system-*.so here) plus selected tools
+# 2) Copy QEMU system executables into bin plus selected tools
+#    Also stage libqemu-system-x86_64.so from sysroot jniLibs into libs (if present)
+# Stage libqemu-system-x86_64.so into libs if present
+if [ -f "$QEMU_SYSTEM_SO_X86_64_SRC" ]; then
+  copy_lib "$QEMU_SYSTEM_SO_X86_64_SRC" "$LIB_OUT/libqemu-system-x86_64.so"
+else
+  echo "Skip missing $QEMU_SYSTEM_SO_X86_64_SRC"
+fi
+
 for arch in $QEMU_ARCHES; do
   exe="$SYS_BIN/qemu-system-$arch"
   if [ -f "$exe" ]; then
@@ -81,6 +91,16 @@ rn libintl.so.8        libintl.so        "$LIB_OUT/libglib-2.0.so"
 rn libglib-2.0.so.0    libglib-2.0.so    "$LIB_OUT/libslirp.so"
 rn libintl.so.8        libintl.so        "$LIB_OUT/libslirp.so"
 
+# 4b) If staged, rewrite NEEDED on libqemu-system-x86_64.so to unversioned names
+if [ -f "$LIB_OUT/libqemu-system-x86_64.so" ]; then
+  rn libslirp.so.0       libslirp.so       "$LIB_OUT/libqemu-system-x86_64.so"
+  rn libgio-2.0.so.0     libgio-2.0.so     "$LIB_OUT/libqemu-system-x86_64.so"
+  rn libgobject-2.0.so.0 libgobject-2.0.so "$LIB_OUT/libqemu-system-x86_64.so"
+  rn libglib-2.0.so.0    libglib-2.0.so    "$LIB_OUT/libqemu-system-x86_64.so"
+  rn libgmodule-2.0.so.0 libgmodule-2.0.so "$LIB_OUT/libqemu-system-x86_64.so"
+  rn libintl.so.8        libintl.so        "$LIB_OUT/libqemu-system-x86_64.so"
+fi
+
 # 5) Rewrite NEEDED on each QEMU executable/tool to point at unversioned libs
 for arch in $QEMU_ARCHES; do
   exe="$BIN_OUT/qemu-system-$arch"
@@ -109,6 +129,11 @@ for so in "$LIB_OUT"/*.so; do
   echo "---- $(basename "$so")"
   readelf -d "$so" | grep -E 'SONAME|NEEDED' || true
 done
+
+if [ -f "$LIB_OUT/libqemu-system-x86_64.so" ]; then
+  echo "---- libqemu-system-x86_64.so"
+  readelf -d "$LIB_OUT/libqemu-system-x86_64.so" | grep -E 'SONAME|NEEDED' || true
+fi
 
 for exe in "$BIN_OUT"/qemu-system-* "$BIN_OUT"/qemu-img; do
   [ -f "$exe" ] || continue
