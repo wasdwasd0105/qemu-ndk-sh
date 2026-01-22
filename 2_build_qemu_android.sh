@@ -19,7 +19,7 @@ BUILD_DIR="${BUILD_DIR:-$BUILD_ROOT/qemu-build-${APP_ABI}}"
 PREFIX="${PREFIX:-$BUILD_ROOT/sysroot-${APP_ABI}}"
 
 NDK_PATH="${NDK_PATH:-$HOME/android-ndk-r27d}"
-API_LEVEL="${API_LEVEL:-30}"
+API_LEVEL="${API_LEVEL:-35}"
 JOBS="${JOBS:-$(nproc)}"
 
 # --- Android toolchain ---
