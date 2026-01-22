@@ -4,7 +4,7 @@ set -euo pipefail
 ### ========= CONFIG =========
 # Default NDK path you asked for
 NDK_PATH="${NDK_PATH:-$HOME/android-ndk-r27d}"
-API_LEVEL="${API_LEVEL:-30}"
+API_LEVEL="${API_LEVEL:-35}"
 APP_ABI="${APP_ABI:-arm64-v8a}"              # arm64-v8a | armeabi-v7a | x86 | x86_64
 BUILD_ROOT="${BUILD_ROOT:-$(pwd)/build}"
 PREFIX="${PREFIX:-$BUILD_ROOT/sysroot-${APP_ABI}}"
