@@ -1,10 +1,17 @@
 #!/usr/bin/env bash
 set -euo pipefail
 
+
+# Macos path
+#NDK_PATH="${NDK_PATH:-$HOME/AndroidNDKr29.app/Contents/NDK}"
+
+# Linux path
+NDK_PATH="${NDK_PATH:-$HOME/android-ndk-r29}"
+
+
 ### ========= CONFIG =========
 # Default NDK path you asked for
-NDK_PATH="${NDK_PATH:-$HOME/android-ndk-r27d}"
-API_LEVEL="${API_LEVEL:-30}"
+API_LEVEL="${API_LEVEL:-31}"
 APP_ABI="${APP_ABI:-arm64-v8a}"              # arm64-v8a | armeabi-v7a | x86 | x86_64
 BUILD_ROOT="${BUILD_ROOT:-$(pwd)/build}"
 PREFIX="${PREFIX:-$BUILD_ROOT/sysroot-${APP_ABI}}"
@@ -12,7 +19,7 @@ PREFIX="${PREFIX:-$BUILD_ROOT/sysroot-${APP_ABI}}"
 # Versions (stable picks)
 LIBFFI_VER="${LIBFFI_VER:-3.4.4}"
 PCRE2_VER="${PCRE2_VER:-10.44}"
-GLIB_VER="${GLIB_VER:-2.78.6}"
+GLIB_VER="${GLIB_VER:-2.83.0}"
 PIXMAN_VER="${PIXMAN_VER:-0.42.2}"
 SDL2_VER="${SDL2_VER:-2.32.10}"
 
@@ -25,7 +32,14 @@ BUILD_DIR="${BUILD_DIR:-$BUILD_ROOT/_build_${APP_ABI}}"
 mkdir -p "$PREFIX" "$SRC_DIR" "$BUILD_DIR"
 
 ### ========= TOOLCHAIN / TARGET TRIPLES =========
-TOOLCHAIN="$NDK_PATH/toolchains/llvm/prebuilt/linux-x86_64"
+HOST_OS=$(uname -s | tr '[:upper:]' '[:lower:]')
+case "$HOST_OS" in
+  linux)   HOST_TAG="linux-x86_64" ;;
+  darwin)  HOST_TAG="darwin-x86_64" ;;
+  *) echo "Unsupported host OS: $HOST_OS" >&2; exit 1 ;;
+esac
+
+TOOLCHAIN="$NDK_PATH/toolchains/llvm/prebuilt/$HOST_TAG"
 
 case "$APP_ABI" in
   arm64-v8a)   TARGET_TRIPLE=aarch64-linux-android;   MESON_CPU=aarch64;  CMAKE_ABI="arm64-v8a" ;;
@@ -49,12 +63,15 @@ export PKG_CONFIG_PATH="$PREFIX/lib/pkgconfig"
 export PKG_CONFIG_LIBDIR="$PREFIX/lib/pkgconfig"
 
 # Android-safe flags (NDK already defines __ANDROID_API__)
-export CFLAGS="-fPIC -fPIE"
+# CRITICAL: -ftls-model=global-dynamic is required when QEMU runs as a .so via JNI.
+# Without it, __thread variables use "initial-exec" TLS which breaks under dlopen().
+# This must be applied to ALL deps, not just QEMU itself.
+export CFLAGS="-fPIC -fPIE -ftls-model=global-dynamic"
 export CXXFLAGS="$CFLAGS"
 export LDFLAGS="-pie"
 
 # Parallelism
-JOBS="${JOBS:-$(nproc)}"
+JOBS="${JOBS:-$(nproc 2>/dev/null || sysctl -n hw.ncpu)}"
 
 ### ========= HELPERS =========
 fetch() {
@@ -102,6 +119,7 @@ cmake -G Ninja "$SRC_DIR/pcre2-${PCRE2_VER}" \
   -DANDROID_PLATFORM="android-${API_LEVEL}" \
   -DCMAKE_BUILD_TYPE=Release \
   -DCMAKE_INSTALL_PREFIX="$PREFIX" \
+  -DCMAKE_C_FLAGS="-ftls-model=global-dynamic" \
   -DBUILD_SHARED_LIBS=ON \
   -DPCRE2_BUILD_PCRE2_8=ON \
   -DPCRE2_BUILD_PCRE2_16=OFF \
@@ -127,7 +145,7 @@ strip = '${STRIP}'
 pkg-config = 'pkg-config'
 
 [built-in options]
-c_args = ['-fPIC','-fPIE']
+c_args = ['-fPIC','-fPIE','-ftls-model=global-dynamic']
 c_link_args = ['-pie']
 
 [host_machine]
@@ -228,6 +246,7 @@ echo "==> Building SDL2 ${SDL2_VER} for ${ANDROID_ABI} (${ANDROID_PLATFORM}) via
   APP_BUILD_SCRIPT=Android.mk \
   APP_ABI="$ANDROID_ABI" \
   APP_PLATFORM="$ANDROID_PLATFORM" \
+  APP_CFLAGS="-ftls-model=global-dynamic" \
   NDK_LIBS_OUT="$BUILD_DIR/sdl2/libs" \
   NDK_OUT="$BUILD_DIR/sdl2/obj" \
   V=0

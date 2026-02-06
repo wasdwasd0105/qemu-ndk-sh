@@ -4,6 +4,13 @@ set -euo pipefail
 # Purpose: collect only QEMU system executables and their deps into opt/qemu/<abi>/{bin,libs}.
 # All build/middleware outputs already live under ./build via scripts 1/2.
 
+# Macos path
+#NDK_PATH="${NDK_PATH:-$HOME/AndroidNDKr29.app/Contents/NDK}"
+
+# Linux path
+NDK_PATH="${NDK_PATH:-$HOME/android-ndk-r29}"
+
+
 ABI="${APP_ABI:-arm64-v8a}"
 QEMU_VERSION="${QEMU_VERSION:-10.0.2}"
 BUILD_ROOT="${BUILD_ROOT:-$(pwd)/build}"
@@ -20,6 +27,16 @@ PCBIOS_SRC="$SYSROOT/share/qemu"
 PCBIOS_ZIP="./opt/qemu/pc-bios.zip"
 VERSION_JSON="./opt/qemu/version.json"
 SUB_VERSION=1
+
+# Use readelf from the NDK toolchain
+HOST_OS=$(uname -s | tr '[:upper:]' '[:lower:]')
+case "$HOST_OS" in
+  linux)   HOST_TAG="linux-x86_64" ;;
+  darwin)  HOST_TAG="darwin-x86_64" ;;
+  *) echo "Unsupported host OS: $HOST_OS" >&2; exit 1 ;;
+esac
+READELF="$NDK_PATH/toolchains/llvm/prebuilt/$HOST_TAG/bin/llvm-readelf"
+
 
 mkdir -p "$BIN_OUT" "$LIB_OUT"
 
@@ -127,18 +144,18 @@ done
 # 6) Show final SONAME/NEEDED for quick verification
 for so in "$LIB_OUT"/*.so; do
   echo "---- $(basename "$so")"
-  readelf -d "$so" | grep -E 'SONAME|NEEDED' || true
+  $READELF -d "$so" | grep -E 'SONAME|NEEDED' || true
 done
 
 if [ -f "$LIB_OUT/libqemu-system-x86_64.so" ]; then
   echo "---- libqemu-system-x86_64.so"
-  readelf -d "$LIB_OUT/libqemu-system-x86_64.so" | grep -E 'SONAME|NEEDED' || true
+  $READELF -d "$LIB_OUT/libqemu-system-x86_64.so" | grep -E 'SONAME|NEEDED' || true
 fi
 
 for exe in "$BIN_OUT"/qemu-system-* "$BIN_OUT"/qemu-img; do
   [ -f "$exe" ] || continue
   echo "---- $(basename "$exe")"
-  readelf -d "$exe" | grep -E 'NEEDED' || true
+  $READELF -d "$exe" | grep -E 'NEEDED' || true
 done
 
 # 7) Zip pc-bios into ./opt/qemu/pc-bios.zip (contents root is pc-bios/)
