@@ -92,124 +92,7 @@ else
   echo "==> Using existing QEMU source directory (not a git repo): $QEMU_SRC"
 fi
 
-# --- Android-specific src tweaks ---
-if [ -f "$QEMU_SRC/backends/meson.build" ] && grep -q 'hostmem-shm\.c' "$QEMU_SRC/backends/meson.build"; then
-  echo "==> Disabling hostmem-shm backend for Android"
-  sed -i.bak '/hostmem-shm\.c/d' "$QEMU_SRC/backends/meson.build"
-fi
-# Skip tests (faster + avoids host-side tooling)
-sed -i.bak "s/subdir('tests')/# subdir('tests')/" "$QEMU_SRC/meson.build" || true
 
-# --- Android patch: disable POSIX shm in util/oslib-posix.c (compile-time stub) ---
-OSLIB="$QEMU_SRC/util/oslib-posix.c"
-ANDROID_SHM_MARKER="ANDROID_DISABLE_POSIX_SHM"
-if ! grep -q "$ANDROID_SHM_MARKER" "$OSLIB"; then
-  echo "==> Patching util/oslib-posix.c to disable POSIX shm on Android (Python-based)"
-  python3 - "$OSLIB" "$ANDROID_SHM_MARKER" <<'PY'
-import sys, re, io
-path, marker = sys.argv[1], sys.argv[2]
-src = io.open(path, 'r', encoding='utf-8').read()
-
-injected = False
-if 'ANDROID_SHM_STUBS' not in src:
-    inject_block = r'''
-/* ANDROID_SHM_STUBS */
-#ifdef __ANDROID__
-#include <errno.h>
-static inline int android_shm_open_stub(const char *name, int oflag, mode_t mode) {
-    errno = ENOSYS;
-    return -1;
-}
-static inline int android_shm_unlink_stub(const char *name) {
-    errno = ENOSYS;
-    return -1;
-}
-#define shm_open android_shm_open_stub
-#define shm_unlink android_shm_unlink_stub
-#endif
-'''
-    inc_pat = re.compile(r'(#include[^\n]+\n)+', re.M)
-    m = inc_pat.search(src)
-    if m:
-        src = src[:m.end()] + inject_block + src[m.end():]
-        injected = True
-
-# match the exact signature as in qemu-10.0.2
-pat = re.compile(
-    r'int\s+qemu_shm_alloc\s*\(\s*size_t\s+size\s*,\s*Error\s*\*\*errp\s*\)\s*\{.*?\n\}',
-    re.S
-)
-
-stub = f'''int qemu_shm_alloc(size_t size, Error **errp)
-{{
-/* {marker} */
-#ifdef __ANDROID__
-    /* Android NDK does not expose shm_open/shm_unlink. We do not need SHM here. */
-    if (errp) {{
-        error_setg_errno(errp, ENOSYS,
-                         "POSIX shared memory is not supported on Android in this build");
-    }}
-    return -1;
-#else
-    /* This Android build script removed the non-Android implementation to avoid
-     * NDK header incompatibilities. If you hit this branch, rebuild without __ANDROID__. */
-    if (errp) {{
-        error_setg_errno(errp, ENOSYS, "qemu_shm_alloc stub reached");
-    }}
-    return -1;
-#endif
-}}
-'''
-
-ns, n = pat.subn(stub, src, count=1)
-if n == 0:
-    print("ERROR: could not find qemu_shm_alloc() to patch", file=sys.stderr)
-    sys.exit(1)
-io.open(path, 'w', encoding='utf-8').write(ns)
-print("patched", "with shm stubs" if injected else "")
-PY
-fi
-
-# --- Android patch: stub shm_open/shm_unlink in contrib/ivshmem-server/ivshmem-server.c ---
-IVSHMEM_C="$QEMU_SRC/contrib/ivshmem-server/ivshmem-server.c"
-IVSHMEM_MARKER="ANDROID_SHM_STUBS_IVSHMEM"
-if [ -f "$IVSHMEM_C" ] && ! grep -q "$IVSHMEM_MARKER" "$IVSHMEM_C"; then
-  echo "==> Patching ivshmem-server.c to stub shm_open/shm_unlink for Android"
-  python3 - "$IVSHMEM_C" "$IVSHMEM_MARKER" <<'PY'
-import sys, re, io
-path, marker = sys.argv[1], sys.argv[2]
-src = io.open(path, 'r', encoding='utf-8').read()
-
-if marker in src:
-    sys.exit(0)
-
-block = f'''
-/* {marker} */
-#ifdef __ANDROID__
-#include <errno.h>
-static inline int android_ivshmem_shm_open(const char *name, int oflag, mode_t mode) {{
-    errno = ENOSYS;
-    return -1;
-}}
-static inline int android_ivshmem_shm_unlink(const char *name) {{
-    errno = ENOSYS;
-    return -1;
-}}
-#define shm_open android_ivshmem_shm_open
-#define shm_unlink android_ivshmem_shm_unlink
-#endif
-'''
-
-inc_pat = re.compile(r'(#include[^\n]+\n)+', re.M)
-m = inc_pat.search(src)
-if not m:
-    print("ERROR: could not find includes to patch", file=sys.stderr)
-    sys.exit(1)
-patched = src[:m.end()] + block + src[m.end():]
-io.open(path, 'w', encoding='utf-8').write(patched)
-print("patched")
-PY
-fi
 
 # ==============================================================
 # Build libucontext for Android (NON-freestanding mode)
@@ -437,7 +320,7 @@ for t in aarch64 i386 x86_64 ppc; do
   if [ -f "$bin" ]; then
     echo "[fallback-as-design] converting $(basename "$bin") -> libqemu-system-${t}.so"
     cp -f "$bin" "$so"
-    safe_strip_debug "$so"
+    #safe_strip_debug "$so"
     cp -f "$so" "$PREFIX/jniLibs/arm64-v8a/"
     echo "Staged: $(basename "$so") (from bin; full dynsym preserved)"
   else
