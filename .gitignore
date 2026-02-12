@@ -1,2 +1,4 @@
 /build/
 /opt/
+.DS_Store
+/.vscode/

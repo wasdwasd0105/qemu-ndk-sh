@@ -63,7 +63,7 @@ export PKG_CONFIG="$WRAP_PC"
 
 # --- Compiler & Linker Flags (Android-safe) ---
 # Export ALL symbols from executables' .dynsym and avoid hidden defaults.
-export CFLAGS="-fPIC -fvisibility=default -ftls-model=global-dynamic -Wno-error -I$PREFIX/include -DSDL_MAIN_HANDLED -I$PREFIX/include/pixman-1 -DANDROID_PLATFORM="android-${API_LEVEL}" "
+export CFLAGS="-fPIC -fvisibility=default -mbranch-protection=none -ftls-model=global-dynamic -Wno-error -I$PREFIX/include -DSDL_MAIN_HANDLED -I$PREFIX/include/pixman-1 -DANDROID_PLATFORM="android-${API_LEVEL}" "
 export CPPFLAGS="$CFLAGS"
 # -Wl,--export-dynamic ensures the executable exposes all global symbols in .dynsym
 export LDFLAGS="-L$PREFIX/lib -Wl,--export-dynamic -lucontext"
@@ -95,16 +95,11 @@ fi
 
 
 # ==============================================================
-# Build libucontext for Android (NON-freestanding mode)
-#
-# We do NOT use FREESTANDING because Android NDK r29 (API 31+)
-# already defines ucontext_t and struct sigcontext in its sysroot.
-# Using FREESTANDING would cause libucontext's bits.h to redefine
-# sigcontext, conflicting with <asm/sigcontext.h>.
-#
-# Instead we build libucontext so it uses the NDK's own types and
-# only provides the missing *functions*: getcontext, setcontext,
-# makecontext, swapcontext.
+# Build libucontext for Android (FREESTANDING mode)
+# This provides getcontext/setcontext/makecontext/swapcontext
+# that Android bionic lacks, allowing QEMU to use the ucontext
+# coroutine backend instead of sigaltstack (which corrupts BQL
+# mutex ownership on bionic during sigsuspend/siglongjmp).
 # ==============================================================
 if [ ! -d "$LIBUCONTEXT_SRC" ]; then
   echo "==> Cloning libucontext ..."
@@ -112,121 +107,68 @@ if [ ! -d "$LIBUCONTEXT_SRC" ]; then
 fi
 
 if [ ! -f "$PREFIX/lib/libucontext.a" ]; then
-  echo "==> Building libucontext for Android aarch64 (non-freestanding, NDK types) ..."
+  echo "==> Building libucontext for Android aarch64 (FREESTANDING mode) ..."
   pushd "$LIBUCONTEXT_SRC" >/dev/null
 
-  # Clean any previous build (manual rm to avoid Makefile host-OS issues)
-  rm -f arch/aarch64/*.o libucontext.a libucontext_posix.a 2>/dev/null || true
+  # Clean any previous build
+  make clean 2>/dev/null || true
 
-  # ---------------------------------------------------------------------------
-  # NDK sysroot path — needed so libucontext picks up the NDK's own
-  # <sys/ucontext.h> and <asm/sigcontext.h> instead of its bundled bits.h.
-  # ---------------------------------------------------------------------------
-  NDK_SYSROOT="$TOOLCHAIN/sysroot"
+  # Build with NDK cross-compiler in freestanding mode
+  # FREESTANDING=yes: use built-in headers (no system ucontext.h needed)
+  # EXPORT_UNPREFIXED=yes: provide standard POSIX names (getcontext, etc.)
+  # Only build the static library — the .dylib/.so target fails because
+  # the Makefile passes macOS linker flags (-dynamiclib) to Android's ld.lld.
+  make \
+    ARCH=aarch64 \
+    CC="$CC" \
+    AR="$AR" \
+    RANLIB="$RANLIB" \
+    FREESTANDING=yes \
+    EXPORT_UNPREFIXED=yes \
+    -j "$JOBS" \
+    libucontext.a
 
-  # ---------------------------------------------------------------------------
-  # Create a REPLACEMENT bits.h that uses the NDK's own types.
-  #
-  # libucontext's libucontext.h does:  #include <libucontext/bits.h>
-  # The original bits.h (in arch/aarch64/include/) redefines sigcontext,
-  # which conflicts with <asm/sigcontext.h> from the NDK.
-  #
-  # Our replacement includes the NDK's <sys/ucontext.h> and typedefs
-  # libucontext_ucontext_t to the NDK's ucontext_t, satisfying
-  # libucontext's internal code without any type conflicts.
-  # ---------------------------------------------------------------------------
-  OVERRIDE_DIR="$BUILD_ROOT/libucontext-override/libucontext"
-  mkdir -p "$OVERRIDE_DIR"
-  cat > "$OVERRIDE_DIR/bits.h" <<'BITS_SHIM'
-/*
- * Replacement bits.h for Android — uses NDK types instead of
- * redefining sigcontext / mcontext_t / ucontext_t.
- */
-#ifndef _LIBUCONTEXT_BITS_H
-#define _LIBUCONTEXT_BITS_H
-
-#include <sys/ucontext.h>
-
-typedef ucontext_t libucontext_ucontext_t;
-
-#endif /* _LIBUCONTEXT_BITS_H */
-BITS_SHIM
-
-  # Build ONLY the static library (.a) manually.
-  # The Makefile's default target tries to build a shared library using
-  # host-OS linker flags (e.g. -dynamiclib on macOS), which fails when
-  # cross-compiling for Android with ld.lld.  We bypass that entirely.
-  #
-  # KEY CHANGES vs the old FREESTANDING build:
-  #   - NO -DFREESTANDING  (use NDK's ucontext_t / sigcontext)
-  #   - Our override dir comes BEFORE arch/aarch64/include so our
-  #     replacement bits.h is found instead of the conflicting one
-  #   - -DEXPORT_UNPREFIXED so the symbols are exported as getcontext() etc.
-  #     rather than libucontext_getcontext()
-  #   - --sysroot to ensure the NDK headers are found
-  UCONTEXT_CFLAGS="-std=gnu99 -D_DEFAULT_SOURCE -fPIC -DPIC -D_XOPEN_SOURCE -DEXPORT_UNPREFIXED --sysroot=$NDK_SYSROOT -I$BUILD_ROOT/libucontext-override -Iinclude -Iarch/aarch64 -Iarch/common"
-  UCONTEXT_ASFLAGS="-fPIC -DPIC -D_XOPEN_SOURCE -DEXPORT_UNPREFIXED --sysroot=$NDK_SYSROOT -I$BUILD_ROOT/libucontext-override -Iinclude -Iarch/aarch64 -Iarch/common"
-
-  $CC $UCONTEXT_CFLAGS -c -o arch/aarch64/makecontext.o  arch/aarch64/makecontext.c
-  $CC $UCONTEXT_CFLAGS -c -o arch/aarch64/trampoline.o   arch/aarch64/trampoline.c
-  $CC $UCONTEXT_ASFLAGS -c -o arch/aarch64/getcontext.o   arch/aarch64/getcontext.S
-  $CC $UCONTEXT_ASFLAGS -c -o arch/aarch64/setcontext.o   arch/aarch64/setcontext.S
-  $CC $UCONTEXT_ASFLAGS -c -o arch/aarch64/swapcontext.o  arch/aarch64/swapcontext.S
-
-  $AR rcs libucontext.a \
-    arch/aarch64/makecontext.o \
-    arch/aarch64/trampoline.o \
-    arch/aarch64/getcontext.o \
-    arch/aarch64/setcontext.o \
-    arch/aarch64/swapcontext.o
-
-  echo "==> libucontext.a built successfully"
-
-  # Manual install into sysroot (skip Makefile install which also has host-OS issues)
-  mkdir -p "$PREFIX/lib" "$PREFIX/include/libucontext"
+  # Install into our sysroot (static lib + headers only)
+  # We install manually since 'make install' also tries to build/install .dylib
+  mkdir -p "$PREFIX/lib" "$PREFIX/lib/pkgconfig" "$PREFIX/include/libucontext"
   cp -f libucontext.a "$PREFIX/lib/"
-  cp -f include/libucontext/libucontext.h "$PREFIX/include/libucontext/"
-  # NOTE: We intentionally do NOT copy arch/aarch64/include/libucontext/bits.h
-  # because it redefines sigcontext and conflicts with the NDK headers.
+  cp -f libucontext.pc "$PREFIX/lib/pkgconfig/" 2>/dev/null || true
+
+  # Install the FREESTANDING libucontext.h header
+  cp -f include/libucontext/libucontext.h "$PREFIX/include/libucontext/" 2>/dev/null || true
+
+  # DO NOT copy bits.h from source tree here — it has two versions
+  # (freestanding vs non-freestanding) and the wrong one keeps getting picked.
+  # The correct freestanding bits.h is generated below.
 
   popd >/dev/null
 
   # Create a ucontext.h shim in our sysroot that QEMU's meson probe can find.
-  #
-  # This shim uses the NDK's own <sys/ucontext.h> for the ucontext_t type
-  # (which the NDK provides at API 23+), and only adds declarations for the
-  # four functions that bionic lacks.  This avoids all type redefinition
-  # conflicts with NDK headers.
+  # This wraps libucontext's freestanding header to provide the standard
+  # ucontext_t / getcontext / makecontext / swapcontext API.
   echo "==> Creating ucontext.h shim in $PREFIX/include ..."
   cat > "$PREFIX/include/ucontext.h" <<'UCONTEXT_SHIM'
 /*
- * ucontext.h shim for Android — provides the missing functions
- * (getcontext/setcontext/makecontext/swapcontext) via libucontext,
- * while using the NDK's own ucontext_t type (from <sys/ucontext.h>).
+ * ucontext.h shim for Android — wraps libucontext (freestanding mode).
  *
- * Android NDK r23+ (API 23+) defines ucontext_t and struct sigcontext
- * in its sysroot.  Bionic simply doesn't implement the four context-
- * switching functions.  libucontext supplies them.
+ * This provides access to libucontext's API. QEMU's patched
+ * coroutine-ucontext.c uses libucontext_* names directly, so the
+ * main purpose of this shim is to satisfy #include <ucontext.h>
+ * and provide function declarations.
+ *
+ * NOTE: NDK r29+ defines its own ucontext_t in <sys/ucontext.h>
+ * (pulled in via signal.h). We do NOT redefine ucontext_t here.
+ * QEMU's patched coroutine-ucontext.c #defines ucontext_t to
+ * libucontext_ucontext_t after including this header.
  */
 #ifndef _ANDROID_UCONTEXT_SHIM_H
 #define _ANDROID_UCONTEXT_SHIM_H
 
-/* Pull in the NDK's own ucontext_t — no type conflicts */
-#include <sys/ucontext.h>
+#include <libucontext/libucontext.h>
 
-/* Declare the functions that bionic lacks; libucontext.a provides them */
-#ifdef __cplusplus
-extern "C" {
-#endif
-
-int  getcontext(ucontext_t *);
-int  setcontext(const ucontext_t *);
-int  swapcontext(ucontext_t *, const ucontext_t *);
-void makecontext(ucontext_t *, void (*)(void), int, ...);
-
-#ifdef __cplusplus
-}
-#endif
+/* Function declarations for the libucontext_ prefixed API.
+ * The unprefixed names (getcontext, etc.) are provided as weak
+ * aliases by libucontext.a (built with EXPORT_UNPREFIXED=yes). */
 
 #endif /* _ANDROID_UCONTEXT_SHIM_H */
 UCONTEXT_SHIM
@@ -237,6 +179,67 @@ UCONTEXT_SHIM
   ls -la "$PREFIX/include/libucontext/" 2>/dev/null || true
 else
   echo "==> libucontext already built, skipping."
+fi
+
+# ============================================================
+# Generate the correct freestanding bits.h with NDK guard
+# ============================================================
+# Always (re)generate this file to avoid any stale/wrong versions.
+# This must match the EXACT layout that libucontext.a assembly expects.
+# The struct sigcontext block is guarded with #ifndef _UAPI__ASM_SIGCONTEXT_H
+# so it doesn't conflict with the NDK's <asm/sigcontext.h> (which osdep.h
+# pulls in via signal.h). Both define identical struct sigcontext (kernel ABI).
+BITS_INSTALLED="$PREFIX/include/libucontext/bits.h"
+mkdir -p "$PREFIX/include/libucontext"
+echo "==> Generating freestanding bits.h for aarch64 ..."
+cat > "$BITS_INSTALLED" <<'GEN_BITS_H'
+#ifndef LIBUCONTEXT_BITS_H
+#define LIBUCONTEXT_BITS_H
+
+#include <stddef.h>
+
+/* LIBUCONTEXT_SIGCONTEXT_GUARD:
+ * Guard against NDK's <asm/sigcontext.h> which defines the same struct.
+ * When the NDK header was already included, skip our definition and just
+ * typedef mcontext_t from the existing struct sigcontext. */
+#ifndef _UAPI__ASM_SIGCONTEXT_H
+typedef struct sigcontext {
+	unsigned long long fault_address;
+	unsigned long long regs[31];
+	unsigned long long sp;
+	unsigned long long pc;
+	unsigned long long pstate;
+	unsigned char __reserved[4096] __attribute__((__aligned__(16)));
+} mcontext_t;
+#else
+typedef struct sigcontext mcontext_t;
+#endif /* _UAPI__ASM_SIGCONTEXT_H */
+
+typedef struct {
+	void *ss_sp;
+	int ss_flags;
+	size_t ss_size;
+} libucontext_stack_t;
+
+typedef struct libucontext_ucontext {
+	unsigned long uc_flags;
+	struct libucontext_ucontext *uc_link;
+	libucontext_stack_t uc_stack;
+	unsigned char __pad[128];
+	mcontext_t uc_mcontext;
+} libucontext_ucontext_t;
+
+#endif /* LIBUCONTEXT_BITS_H */
+GEN_BITS_H
+echo "==> bits.h generated"
+
+# Patch libucontext.h: fix missing (void) prototype to silence -Wstrict-prototypes
+LIBUCONTEXT_H="$PREFIX/include/libucontext/libucontext.h"
+if [ -f "$LIBUCONTEXT_H" ] && grep -q 'void (\*)()' "$LIBUCONTEXT_H"; then
+  echo "==> Patching libucontext.h to fix function prototype ..."
+  sed -i.bak 's|void (\*)()|void (*)(void)|g' "$LIBUCONTEXT_H"
+  rm -f "$LIBUCONTEXT_H.bak"
+  echo "==> libucontext.h patched"
 fi
 
 # --- Clean out-of-tree build dir and (re)create ---
@@ -284,6 +287,7 @@ cd "$BUILD_DIR"
   --enable-slirp \
   --disable-vhost-user \
   --disable-virtfs \
+  -Dcoroutine_pool=false \
   $PIXMAN_OPT \
   --target-list="aarch64-softmmu,i386-softmmu,x86_64-softmmu,ppc-softmmu" 
 
