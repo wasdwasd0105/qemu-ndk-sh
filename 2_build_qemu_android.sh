@@ -92,7 +92,17 @@ else
   echo "==> Using existing QEMU source directory (not a git repo): $QEMU_SRC"
 fi
 
-
+# --- Apply SLIRP Android DNS patch ---
+SLIRP_PATCH="$(cd "$(dirname "$0")" && pwd)/slirp_android_dns.patch"
+if [ -f "$SLIRP_PATCH" ]; then
+  echo "==> Applying SLIRP Android DNS patch ..."
+  if git -C "$QEMU_SRC/subprojects/slirp" apply --check "$SLIRP_PATCH" 2>/dev/null; then
+    git -C "$QEMU_SRC/subprojects/slirp" apply "$SLIRP_PATCH"
+    echo "==> SLIRP patch applied successfully."
+  else
+    echo "==> SLIRP patch already applied or not needed, skipping."
+  fi
+fi
 
 # ==============================================================
 # Build libucontext for Android (FREESTANDING mode)

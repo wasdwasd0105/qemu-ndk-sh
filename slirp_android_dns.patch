@@ -1,0 +1,99 @@
+diff --git a/src/slirp.c b/src/slirp.c
+index f26c987..e91ea7f 100644
+--- a/src/slirp.c
++++ b/src/slirp.c
+@@ -366,6 +366,33 @@ int get_dns6_addr(struct in6_addr *pdns6_addr, uint32_t *scope_id)
+ #define RESOLV_CONF_PATH "/etc/resolv.conf"
+ #endif
+ 
++#if defined(__ANDROID__)
++/*
++ * On Android, /etc/resolv.conf does not exist. The Java side writes a
++ * resolv.conf to the app's private storage and passes its path via
++ * the SLIRP_RESOLV_CONF environment variable (set from JNI before QEMU
++ * starts). If the env var is not set or the file cannot be opened,
++ * we fall back to Google Public DNS (8.8.8.8).
++ */
++static const char *get_resolv_conf_path(void)
++{
++    const char *p = getenv("SLIRP_RESOLV_CONF");
++    if (p && *p) {
++        return p;
++    }
++    return RESOLV_CONF_PATH;
++}
++
++#define ANDROID_DEFAULT_DNS4 "8.8.8.8"
++#define ANDROID_DEFAULT_DNS6 "2001:4860:4860::8888"
++
++#else
++static const char *get_resolv_conf_path(void)
++{
++    return RESOLV_CONF_PATH;
++}
++#endif /* __ANDROID__ */
++
+ static int get_dns_addr_cached(void *pdns_addr, void *cached_addr,
+                                socklen_t addrlen, struct stat *cached_stat,
+                                unsigned *cached_time)
+@@ -376,7 +403,28 @@ static int get_dns_addr_cached(void *pdns_addr, void *cached_addr,
+         return 0;
+     }
+     old_stat = *cached_stat;
+-    if (stat(RESOLV_CONF_PATH, cached_stat) != 0) {
++    if (stat(get_resolv_conf_path(), cached_stat) != 0) {
++#if defined(__ANDROID__)
++        /*
++         * On Android the resolv.conf file may not exist at all.
++         * If we already have a cached DNS address (from the fallback),
++         * keep using it instead of failing.
++         */
++        if (addrlen == sizeof(struct in_addr)) {
++            struct in_addr *addr = (struct in_addr *)cached_addr;
++            if (addr->s_addr != 0) {
++                *cached_time = curtime;
++                memcpy(pdns_addr, cached_addr, addrlen);
++                return 0;
++            }
++        } else {
++            if (!in6_zero((struct in6_addr *)cached_addr)) {
++                *cached_time = curtime;
++                memcpy(pdns_addr, cached_addr, addrlen);
++                return 0;
++            }
++        }
++#endif
+         return -1;
+     }
+     if (cached_stat->st_dev == old_stat.st_dev &&
+@@ -443,10 +491,27 @@ static int get_dns_addr_resolv_conf(int af, void *pdns_addr, void *cached_addr,
+     unsigned if_index;
+     unsigned nameservers = 0;
+ 
+-    f = fopen(RESOLV_CONF_PATH, "r");
+-    if (!f)
++    f = fopen(get_resolv_conf_path(), "r");
++    if (!f) {
++#if defined(__ANDROID__)
++        /*
++         * resolv.conf not available — use hardcoded fallback DNS so that
++         * networking works out of the box on Android.
++         */
++        if (af == AF_INET) {
++            found += try_and_setdns_server(af, found, 0, ANDROID_DEFAULT_DNS4,
++                            pdns_addr, cached_addr, addrlen, scope_id,
++                            cached_scope_id, cached_time);
++        } else {
++            found += try_and_setdns_server(af, found, 0, ANDROID_DEFAULT_DNS6,
++                            pdns_addr, cached_addr, addrlen, scope_id,
++                            cached_scope_id, cached_time);
++        }
++        return found ? 0 : -1;
++#else
+         return -1;
+-
++#endif
++    }
+     DEBUG_MISC("IP address of your DNS(s):");
+     while (fgets(buff, 512, f) != NULL) {
+         if (sscanf(buff, "nameserver%*[ \t]%256s", buff2) == 1) {
