@@ -281,3 +281,155 @@ Cflags: -I\${includedir}
 EOF
 
 echo "SDL2 .pc:  $PREFIX/lib/pkgconfig/sdl2.pc"
+
+### ========= 6) libepoxy (EGL-only, for OpenGL support) =========
+EPOXY_GIT_URL="${EPOXY_GIT_URL:-https://github.com/anholt/libepoxy.git}"
+EPOXY_SRC="$SRC_DIR/libepoxy"
+
+if [ ! -d "$EPOXY_SRC" ]; then
+  echo "==> Cloning libepoxy ..."
+  git clone --depth 1 "$EPOXY_GIT_URL" "$EPOXY_SRC"
+fi
+
+MESON_CROSS_EPOXY="$BUILD_DIR/epoxy.cross"
+cat > "$MESON_CROSS_EPOXY" <<EOF
+[binaries]
+c = '${CC}'
+cpp = '${CXX}'
+ar = '${AR}'
+strip = '${STRIP}'
+pkg-config = 'pkg-config'
+
+[built-in options]
+c_args = ['-fPIC','-fPIE','-ftls-model=global-dynamic']
+c_link_args = ['-pie']
+
+[host_machine]
+system = 'linux'
+cpu_family = '${MESON_CPU}'
+cpu = '${MESON_CPU}'
+endian = 'little'
+EOF
+
+mkdir -p "$BUILD_DIR/epoxy"
+cd "$BUILD_DIR/epoxy"
+[ -f build.ninja ] && rm -rf ./*
+
+echo "==> Configuring libepoxy (EGL-only for Android)"
+meson setup . "$EPOXY_SRC" \
+  --cross-file "$MESON_CROSS_EPOXY" \
+  --prefix "$PREFIX" \
+  -Ddefault_library=shared \
+  -Degl=yes \
+  -Dglx=no \
+  -Dx11=false \
+  -Dtests=false
+
+echo "==> Building libepoxy"
+meson compile -j"$JOBS"
+meson install
+
+echo "epoxy .pc: $(ls -1 $PREFIX/lib/pkgconfig/epoxy.pc 2>/dev/null || echo 'not found')"
+
+### ========= 7) virglrenderer (for virtio-gpu GL acceleration) =========
+VIRGL_GIT_URL="${VIRGL_GIT_URL:-https://gitlab.freedesktop.org/virgl/virglrenderer.git}"
+VIRGL_SRC="$SRC_DIR/virglrenderer"
+
+if [ ! -d "$VIRGL_SRC" ]; then
+  echo "==> Cloning virglrenderer ..."
+  git clone --depth 1 "$VIRGL_GIT_URL" "$VIRGL_SRC"
+fi
+
+# Apply Android patch: enable EGL without GBM on Android
+VIRGL_PATCH="$(cd "$(dirname "$0")" && pwd)/virglrenderer_android.patch"
+if [ -f "$VIRGL_PATCH" ]; then
+  echo "==> Applying virglrenderer Android patch ..."
+  if git -C "$VIRGL_SRC" apply --check "$VIRGL_PATCH" 2>/dev/null; then
+    git -C "$VIRGL_SRC" apply "$VIRGL_PATCH"
+    echo "==> virglrenderer Android patch applied successfully."
+  else
+    echo "==> virglrenderer Android patch already applied or not needed, skipping."
+  fi
+fi
+
+# --- Create Android NDK compatibility shim headers ---
+# virglrenderer's mesa utils include AOSP-only headers (log/log.h,
+# cutils/properties.h) that are NOT in the NDK. Create thin shims.
+COMPAT_DIR="$PREFIX/include/compat"
+mkdir -p "$COMPAT_DIR/log" "$COMPAT_DIR/cutils"
+
+echo "==> Creating Android NDK compat shim headers for virglrenderer ..."
+cat > "$COMPAT_DIR/log/log.h" <<'SHIM_LOG'
+/* NDK compat shim: map AOSP <log/log.h> to NDK <android/log.h> */
+#ifndef _COMPAT_LOG_LOG_H
+#define _COMPAT_LOG_LOG_H
+#include <android/log.h>
+#ifndef LOG_PRI
+#define LOG_PRI(priority, tag, ...) \
+    __android_log_print(priority, tag, __VA_ARGS__)
+#endif
+#endif
+SHIM_LOG
+
+cat > "$COMPAT_DIR/cutils/properties.h" <<'SHIM_PROP'
+/* NDK compat stub: provide property_get() without libcutils.
+ * Returns 0 (no value) so callers fall through to defaults. */
+#ifndef _COMPAT_CUTILS_PROPERTIES_H
+#define _COMPAT_CUTILS_PROPERTIES_H
+#include <string.h>
+#ifndef PROPERTY_VALUE_MAX
+#define PROPERTY_VALUE_MAX 92
+#endif
+#ifndef PROPERTY_KEY_MAX
+#define PROPERTY_KEY_MAX 32
+#endif
+static inline int property_get(const char *key, char *value,
+                               const char *default_value) {
+    (void)key;
+    if (default_value) {
+        strncpy(value, default_value, PROPERTY_VALUE_MAX - 1);
+        value[PROPERTY_VALUE_MAX - 1] = '\0';
+        return (int)strlen(value);
+    }
+    value[0] = '\0';
+    return 0;
+}
+#endif
+SHIM_PROP
+
+MESON_CROSS_VIRGL="$BUILD_DIR/virgl.cross"
+cat > "$MESON_CROSS_VIRGL" <<EOF
+[binaries]
+c = '${CC}'
+cpp = '${CXX}'
+ar = '${AR}'
+strip = '${STRIP}'
+pkg-config = 'pkg-config'
+
+[built-in options]
+c_args = ['-fPIC','-fPIE','-ftls-model=global-dynamic','-I${COMPAT_DIR}']
+c_link_args = ['-pie','-llog']
+
+[host_machine]
+system = 'linux'
+cpu_family = '${MESON_CPU}'
+cpu = '${MESON_CPU}'
+endian = 'little'
+EOF
+
+mkdir -p "$BUILD_DIR/virglrenderer"
+cd "$BUILD_DIR/virglrenderer"
+[ -f build.ninja ] && rm -rf ./*
+
+echo "==> Configuring virglrenderer (for Android)"
+meson setup . "$VIRGL_SRC" \
+  --cross-file "$MESON_CROSS_VIRGL" \
+  --prefix "$PREFIX" \
+  -Ddefault_library=shared \
+  -Dtests=false
+
+echo "==> Building virglrenderer"
+meson compile -j"$JOBS"
+meson install
+
+echo "virglrenderer .pc: $(ls -1 $PREFIX/lib/pkgconfig/virglrenderer.pc 2>/dev/null || echo 'not found')"
