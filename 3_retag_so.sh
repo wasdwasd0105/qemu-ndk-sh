@@ -18,7 +18,7 @@ SYSROOT="${SYSROOT:-$BUILD_ROOT/sysroot-${ABI}}"
 SYS_LIB="$SYSROOT/lib"
 SYS_BIN="$SYSROOT/bin"
 JNI_LIB_DIR="$SYSROOT/jniLibs/$ABI"
-QEMU_SYSTEM_SO_X86_64_SRC="$JNI_LIB_DIR/libqemu-system-x86_64.so"
+# (removed single-arch variable — all arches staged below)
 
 DEST_ROOT="./opt/qemu/${ABI}"
 BIN_OUT="$DEST_ROOT/bin"
@@ -64,14 +64,15 @@ copy_lib "$SYS_LIB/libpixman-1.so"      "$LIB_OUT/libpixman-1.so"
 [ -f "$SYS_LIB/libepoxy.so" ]         && copy_lib "$SYS_LIB/libepoxy.so"         "$LIB_OUT/libepoxy.so"
 [ -f "$SYS_LIB/libvirglrenderer.so" ] && copy_lib "$SYS_LIB/libvirglrenderer.so" "$LIB_OUT/libvirglrenderer.so"
 
-# 2) Copy QEMU system executables into bin plus selected tools
-#    Also stage libqemu-system-x86_64.so from sysroot jniLibs into libs (if present)
-# Stage libqemu-system-x86_64.so into libs if present
-if [ -f "$QEMU_SYSTEM_SO_X86_64_SRC" ]; then
-  copy_lib "$QEMU_SYSTEM_SO_X86_64_SRC" "$LIB_OUT/libqemu-system-x86_64.so"
-else
-  echo "Skip missing $QEMU_SYSTEM_SO_X86_64_SRC"
-fi
+# 2) Stage libqemu-system-*.so from sysroot jniLibs into libs (all arches)
+for arch in $QEMU_ARCHES; do
+  so_src="$JNI_LIB_DIR/libqemu-system-${arch}.so"
+  if [ -f "$so_src" ]; then
+    copy_lib "$so_src" "$LIB_OUT/libqemu-system-${arch}.so"
+  else
+    echo "Skip missing $so_src"
+  fi
+done
 
 for arch in $QEMU_ARCHES; do
   exe="$SYS_BIN/qemu-system-$arch"
@@ -117,17 +118,20 @@ if [ -f "$LIB_OUT/libvirglrenderer.so" ]; then
   rn libintl.so.8        libintl.so        "$LIB_OUT/libvirglrenderer.so"
 fi
 
-# 4b) If staged, rewrite NEEDED on libqemu-system-x86_64.so to unversioned names
-if [ -f "$LIB_OUT/libqemu-system-x86_64.so" ]; then
-  rn libslirp.so.0       libslirp.so       "$LIB_OUT/libqemu-system-x86_64.so"
-  rn libgio-2.0.so.0     libgio-2.0.so     "$LIB_OUT/libqemu-system-x86_64.so"
-  rn libgobject-2.0.so.0 libgobject-2.0.so "$LIB_OUT/libqemu-system-x86_64.so"
-  rn libglib-2.0.so.0    libglib-2.0.so    "$LIB_OUT/libqemu-system-x86_64.so"
-  rn libgmodule-2.0.so.0 libgmodule-2.0.so "$LIB_OUT/libqemu-system-x86_64.so"
-  rn libintl.so.8        libintl.so        "$LIB_OUT/libqemu-system-x86_64.so"
-  rn libepoxy.so.0       libepoxy.so       "$LIB_OUT/libqemu-system-x86_64.so"
-  rn libvirglrenderer.so.1 libvirglrenderer.so "$LIB_OUT/libqemu-system-x86_64.so"
-fi
+# 4b) Rewrite NEEDED on all libqemu-system-*.so to unversioned names
+for arch in $QEMU_ARCHES; do
+  so="$LIB_OUT/libqemu-system-${arch}.so"
+  [ -f "$so" ] || continue
+  echo "Patching NEEDED entries in $(basename "$so")"
+  rn libslirp.so.0         libslirp.so         "$so"
+  rn libgio-2.0.so.0       libgio-2.0.so       "$so"
+  rn libgobject-2.0.so.0   libgobject-2.0.so   "$so"
+  rn libglib-2.0.so.0      libglib-2.0.so      "$so"
+  rn libgmodule-2.0.so.0   libgmodule-2.0.so   "$so"
+  rn libintl.so.8          libintl.so          "$so"
+  rn libepoxy.so.0         libepoxy.so         "$so"
+  rn libvirglrenderer.so.1 libvirglrenderer.so "$so"
+done
 
 # 5) Rewrite NEEDED on each QEMU executable/tool to point at unversioned libs
 for arch in $QEMU_ARCHES; do
@@ -160,10 +164,7 @@ for so in "$LIB_OUT"/*.so; do
   $READELF -d "$so" | grep -E 'SONAME|NEEDED' || true
 done
 
-if [ -f "$LIB_OUT/libqemu-system-x86_64.so" ]; then
-  echo "---- libqemu-system-x86_64.so"
-  $READELF -d "$LIB_OUT/libqemu-system-x86_64.so" | grep -E 'SONAME|NEEDED' || true
-fi
+# (libqemu-system-*.so are already covered by the *.so glob above)
 
 for exe in "$BIN_OUT"/qemu-system-* "$BIN_OUT"/qemu-img; do
   [ -f "$exe" ] || continue
