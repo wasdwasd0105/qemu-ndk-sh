@@ -61,8 +61,7 @@ copy_lib "$SYS_LIB/libslirp.so.0"       "$LIB_OUT/libslirp.so"
 copy_lib "$SYS_LIB/libpixman-1.so"      "$LIB_OUT/libpixman-1.so"
 [ -f "$SYS_LIB/libgthread-2.0.so.0" ] && copy_lib "$SYS_LIB/libgthread-2.0.so.0" "$LIB_OUT/libgthread-2.0.so"
 [ -f "$SYS_LIB/libffi.so" ]           && copy_lib "$SYS_LIB/libffi.so"           "$LIB_OUT/libffi.so"
-[ -f "$SYS_LIB/libepoxy.so" ]         && copy_lib "$SYS_LIB/libepoxy.so"         "$LIB_OUT/libepoxy.so"
-[ -f "$SYS_LIB/libvirglrenderer.so" ] && copy_lib "$SYS_LIB/libvirglrenderer.so" "$LIB_OUT/libvirglrenderer.so"
+[ -f "$SYS_LIB/libusb-1.0.so" ]      && copy_lib "$SYS_LIB/libusb-1.0.so"      "$LIB_OUT/libusb-1.0.so"
 
 # 2) Stage libqemu-system-*.so from sysroot jniLibs into libs (all arches)
 for arch in $QEMU_ARCHES; do
@@ -111,14 +110,7 @@ rn libintl.so.8        libintl.so        "$LIB_OUT/libglib-2.0.so"
 rn libglib-2.0.so.0    libglib-2.0.so    "$LIB_OUT/libslirp.so"
 rn libintl.so.8        libintl.so        "$LIB_OUT/libslirp.so"
 
-# 4a) Rewrite NEEDED on virglrenderer and epoxy
-if [ -f "$LIB_OUT/libvirglrenderer.so" ]; then
-  rn libepoxy.so.0       libepoxy.so       "$LIB_OUT/libvirglrenderer.so"
-  rn libglib-2.0.so.0    libglib-2.0.so    "$LIB_OUT/libvirglrenderer.so"
-  rn libintl.so.8        libintl.so        "$LIB_OUT/libvirglrenderer.so"
-fi
-
-# 4b) Rewrite NEEDED on all libqemu-system-*.so to unversioned names
+# 4a) Rewrite NEEDED on all libqemu-system-*.so to unversioned names
 for arch in $QEMU_ARCHES; do
   so="$LIB_OUT/libqemu-system-${arch}.so"
   [ -f "$so" ] || continue
@@ -129,8 +121,7 @@ for arch in $QEMU_ARCHES; do
   rn libglib-2.0.so.0      libglib-2.0.so      "$so"
   rn libgmodule-2.0.so.0   libgmodule-2.0.so   "$so"
   rn libintl.so.8          libintl.so          "$so"
-  rn libepoxy.so.0         libepoxy.so         "$so"
-  rn libvirglrenderer.so.1 libvirglrenderer.so "$so"
+  rn libusb-1.0.so.0       libusb-1.0.so       "$so"
 done
 
 # 5) Rewrite NEEDED on each QEMU executable/tool to point at unversioned libs
@@ -144,8 +135,7 @@ for arch in $QEMU_ARCHES; do
   rn libglib-2.0.so.0    libglib-2.0.so    "$exe"
   rn libgmodule-2.0.so.0 libgmodule-2.0.so "$exe"
   rn libintl.so.8        libintl.so        "$exe"
-  rn libepoxy.so.0       libepoxy.so       "$exe"
-  rn libvirglrenderer.so.1 libvirglrenderer.so "$exe"
+  rn libusb-1.0.so.0       libusb-1.0.so       "$so"
 done
 for tool in $QEMU_TOOLS; do
   exe="$BIN_OUT/$tool"

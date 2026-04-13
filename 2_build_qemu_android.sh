@@ -66,7 +66,7 @@ export PKG_CONFIG="$WRAP_PC"
 export CFLAGS="-fPIC -fvisibility=default -mbranch-protection=none -ftls-model=global-dynamic -Wno-error -I$PREFIX/include -DSDL_MAIN_HANDLED -I$PREFIX/include/pixman-1 -DANDROID_PLATFORM="android-${API_LEVEL}" "
 export CPPFLAGS="$CFLAGS"
 # -Wl,--export-dynamic ensures the executable exposes all global symbols in .dynsym
-export LDFLAGS="-L$PREFIX/lib -Wl,--export-dynamic -lucontext -lEGL -lGLESv2"
+export LDFLAGS="-L$PREFIX/lib -Wl,--export-dynamic -lucontext"
 
 # Native compiler for small host build helpers
 HOST_CC="${HOST_CC:-$(command -v cc || true)}"
@@ -104,17 +104,6 @@ if [ -f "$SLIRP_PATCH" ]; then
   fi
 fi
 
-# --- Apply Android EGL patch (for OpenGL/virglrenderer support) ---
-EGL_PATCH="$(cd "$(dirname "$0")" && pwd)/qemu_android_egl.patch"
-if [ -f "$EGL_PATCH" ]; then
-  echo "==> Applying Android EGL patch ..."
-  if git -C "$QEMU_SRC" apply --check "$EGL_PATCH" 2>/dev/null; then
-    git -C "$QEMU_SRC" apply "$EGL_PATCH"
-    echo "==> Android EGL patch applied successfully."
-  else
-    echo "==> Android EGL patch already applied or not needed, skipping."
-  fi
-fi
 
 # ==============================================================
 # Build libucontext for Android (FREESTANDING mode)
@@ -274,8 +263,8 @@ echo "==> pkg-config quick check (Android-cross deps in $PREFIX)"
 echo "GLib:           $(pkg-config --modversion glib-2.0 2>/dev/null || echo 'NOT FOUND')"
 echo "Pixman:         $(pkg-config --modversion pixman-1 2>/dev/null || echo 'NOT FOUND')"
 echo "SDL2:           $(pkg-config --modversion sdl2 2>/dev/null || echo 'NOT FOUND')"
-echo "epoxy:          $(pkg-config --modversion epoxy 2>/dev/null || echo 'NOT FOUND')"
-echo "virglrenderer:  $(pkg-config --modversion virglrenderer 2>/dev/null || echo 'NOT FOUND')"
+echo "libusb:         $(pkg-config --modversion libusb-1.0 2>/dev/null || echo 'NOT FOUND')"
+
 
 # Pixman optional gate
 if pkg-config --exists pixman-1; then
@@ -311,8 +300,10 @@ cd "$BUILD_DIR"
   --disable-vhost-user \
   --disable-virtfs \
   -Dcoroutine_pool=false \
-  -Dopengl=enabled \
-  -Dvirglrenderer=enabled \
+  --enable-libusb \
+  --audio-drv-list=aaudio \
+  -Dopengl=disabled \
+  -Dvirglrenderer=disabled \
   -Dvnc=enabled \
   -Dvnc_jpeg=disabled \
   -Dvnc_sasl=disabled \
@@ -352,24 +343,12 @@ for t in aarch64 i386 x86_64 ppc; do
   if [ -f "$bin" ]; then
     echo "[fallback-as-design] converting $(basename "$bin") -> libqemu-system-${t}.so"
     cp -f "$bin" "$so"
-    #safe_strip_debug "$so"
+    safe_strip_debug "$so"
     cp -f "$so" "$PREFIX/jniLibs/arm64-v8a/"
     echo "Staged: $(basename "$so") (from bin; full dynsym preserved)"
   else
     echo "[warn] missing $bin"
     missing=1
-  fi
-done
-
-# --- Stage dependency shared libraries needed at runtime ---
-for dep_lib in libepoxy.so libvirglrenderer.so; do
-  src="$PREFIX/lib/$dep_lib"
-  if [ -f "$src" ]; then
-    # Android dlopen requires lib prefix — these already have it
-    cp -f "$src" "$PREFIX/jniLibs/arm64-v8a/"
-    echo "Staged: $dep_lib (runtime dependency)"
-  else
-    echo "[warn] missing $src"
   fi
 done
 
