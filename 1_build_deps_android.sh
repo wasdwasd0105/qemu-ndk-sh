@@ -22,6 +22,10 @@ PCRE2_VER="${PCRE2_VER:-10.44}"
 GLIB_VER="${GLIB_VER:-2.83.0}"
 PIXMAN_VER="${PIXMAN_VER:-0.42.2}"
 SDL2_VER="${SDL2_VER:-2.32.10}"
+GMP_VER="${GMP_VER:-6.3.0}"
+NETTLE_VER="${NETTLE_VER:-3.10}"
+GNUTLS_VER="${GNUTLS_VER:-3.8.7}"
+GNUTLS_MAJMIN="${GNUTLS_VER%.*}"   # e.g. 3.8
 
 # Also build pixman? (1=yes, 0=no)
 BUILD_PIXMAN="${BUILD_PIXMAN:-1}"
@@ -66,6 +70,11 @@ export PKG_CONFIG_LIBDIR="$PREFIX/lib/pkgconfig"
 # CRITICAL: -ftls-model=global-dynamic is required when QEMU runs as a .so via JNI.
 # Without it, __thread variables use "initial-exec" TLS which breaks under dlopen().
 # This must be applied to ALL deps, not just QEMU itself.
+# NOTE: do NOT add -I$PREFIX/include / -L$PREFIX/lib globally here — GLib
+# fails its `libintl.type_name() == 'internal'` assert if it discovers an
+# external libintl from a previous build. Deps that need cross-references
+# (nettle->gmp, gnutls->nettle/hogweed/gmp) set their own --with-*-path
+# flags or pass *_CFLAGS/*_LIBS env vars at configure time.
 export CFLAGS="-fPIC -fPIE -ftls-model=global-dynamic"
 export CXXFLAGS="$CFLAGS"
 export LDFLAGS="-pie"
@@ -307,3 +316,158 @@ EOF
 echo "SDL2 .pc:  $PREFIX/lib/pkgconfig/sdl2.pc"
 
 
+### ========= 6) GMP =========
+# Used by Nettle (which uses it for big-int math) and ultimately by GnuTLS.
+# Idempotent: skips if already installed.
+if [ -f "$PREFIX/lib/libgmp.so" ]; then
+  echo "==> libgmp.so already installed, skipping GMP build."
+else
+  cd "$SRC_DIR"
+  fetch "https://gmplib.org/download/gmp/gmp-${GMP_VER}.tar.xz" "gmp-${GMP_VER}.tar.xz"
+  [ -d "gmp-${GMP_VER}" ] || tar xf "gmp-${GMP_VER}.tar.xz"
+
+  mkdir -p "$BUILD_DIR/gmp"
+  cd "$BUILD_DIR/gmp"
+  [ -f Makefile ] && make distclean || true
+
+  echo "==> Configuring GMP ${GMP_VER}"
+  # --disable-assembly: GMP's hand-written aarch64 asm trips on NDK clang in
+  # some configurations; the C fallback works and is plenty fast for TLS.
+  "$SRC_DIR/gmp-${GMP_VER}/configure" \
+    --host="${TARGET_TRIPLE}" \
+    --prefix="$PREFIX" \
+    --enable-shared \
+    --disable-static \
+    --disable-assembly
+
+  echo "==> Building GMP"
+  make -j"$JOBS"
+  make install
+fi
+
+### ========= 7) Nettle (+ Hogweed) =========
+if [ -f "$PREFIX/lib/libnettle.so" ] && [ -f "$PREFIX/lib/libhogweed.so" ]; then
+  echo "==> libnettle / libhogweed already installed, skipping Nettle build."
+else
+  cd "$SRC_DIR"
+  fetch "https://ftp.gnu.org/gnu/nettle/nettle-${NETTLE_VER}.tar.gz" "nettle-${NETTLE_VER}.tar.gz"
+  [ -d "nettle-${NETTLE_VER}" ] || tar xf "nettle-${NETTLE_VER}.tar.gz"
+
+  mkdir -p "$BUILD_DIR/nettle"
+  cd "$BUILD_DIR/nettle"
+  [ -f Makefile ] && make distclean || true
+
+  echo "==> Configuring Nettle ${NETTLE_VER}"
+  "$SRC_DIR/nettle-${NETTLE_VER}/configure" \
+    --host="${TARGET_TRIPLE}" \
+    --prefix="$PREFIX" \
+    --enable-shared \
+    --disable-static \
+    --disable-documentation \
+    --disable-openssl \
+    --with-include-path="$PREFIX/include" \
+    --with-lib-path="$PREFIX/lib"
+
+  echo "==> Building Nettle"
+  make -j"$JOBS"
+  make install
+fi
+
+### ========= 8) GnuTLS =========
+# Required by QEMU for VNC TLS x509 credentials (--enable-gnutls).
+if [ -f "$PREFIX/lib/libgnutls.so" ]; then
+  echo "==> libgnutls.so already installed, skipping GnuTLS build."
+else
+  cd "$SRC_DIR"
+  fetch "https://www.gnupg.org/ftp/gcrypt/gnutls/v${GNUTLS_MAJMIN}/gnutls-${GNUTLS_VER}.tar.xz" "gnutls-${GNUTLS_VER}.tar.xz"
+  [ -d "gnutls-${GNUTLS_VER}" ] || tar xf "gnutls-${GNUTLS_VER}.tar.xz"
+
+  # GnuTLS 3.8.x always compiles its dlwrap shims for zstd/brotli, even with
+  # --without-zstd / --without-brotli. The shims #include the system headers
+  # unconditionally, but only reference real symbols when the matching
+  # GNUTLS_*_ENABLE_DLOPEN macro is set (which it isn't, since we disable
+  # both). Provide empty stub headers so the unconditional includes resolve.
+  GNUTLS_STUBS="$BUILD_DIR/gnutls-stubs"
+  mkdir -p "$GNUTLS_STUBS/brotli"
+  : > "$GNUTLS_STUBS/zstd.h"
+  : > "$GNUTLS_STUBS/brotli/encode.h"
+  : > "$GNUTLS_STUBS/brotli/decode.h"
+
+  # Android NDK r29 defines timezone_t in <time.h> but only declares the
+  # functions tzalloc/tzfree/mktime_z/localtime_rz at API >= 35. We target
+  # API 31, so gnulib's src/gl/ helper code (used only by gnutls's CLI
+  # tools, which we --disable-tools) fails to compile. Provide a wrapper
+  # <time.h> on the include path that chains to the NDK's via
+  # #include_next and then adds weak prototypes. With -I$GNUTLS_STUBS in
+  # CFLAGS this wrapper is found first; nothing actually links these
+  # symbols since --disable-tools means the convenience archive is unused.
+  cat > "$GNUTLS_STUBS/time.h" <<'TZSTUBS'
+#ifndef _GNUTLS_ANDROID_TIME_WRAPPER_H
+#define _GNUTLS_ANDROID_TIME_WRAPPER_H
+#include_next <time.h>
+extern timezone_t tzalloc(const char *zone) __attribute__((weak));
+extern void tzfree(timezone_t tz) __attribute__((weak));
+extern struct tm *localtime_rz(timezone_t tz, const time_t *t, struct tm *tmp) __attribute__((weak));
+extern time_t mktime_z(timezone_t tz, struct tm *tm) __attribute__((weak));
+#endif
+TZSTUBS
+
+  rm -rf "$BUILD_DIR/gnutls"
+  mkdir -p "$BUILD_DIR/gnutls"
+  cd "$BUILD_DIR/gnutls"
+
+  echo "==> Configuring GnuTLS ${GNUTLS_VER}"
+  # --with-included-libtasn1 + --with-included-unistring: avoid pulling
+  #   in extra deps; these are tiny and ship with gnutls.
+  # --without-p11-kit / --without-tpm / --without-tpm2: skip optional features.
+  # --disable-doc/tools/tests/cxx/guile/libdane/nls: we only need the lib.
+  # --disable-hardware-acceleration: avoid CPU-feature autodetect issues
+  #   under NDK clang for cross builds.
+  GMP_CFLAGS="-I$PREFIX/include" \
+  GMP_LIBS="-L$PREFIX/lib -lgmp" \
+  NETTLE_CFLAGS="-I$PREFIX/include" \
+  NETTLE_LIBS="-L$PREFIX/lib -lnettle" \
+  HOGWEED_CFLAGS="-I$PREFIX/include" \
+  HOGWEED_LIBS="-L$PREFIX/lib -lhogweed -lnettle -lgmp" \
+  CFLAGS="$CFLAGS -I$GNUTLS_STUBS" \
+  CPPFLAGS="${CPPFLAGS:-} -I$GNUTLS_STUBS" \
+  gl_cv_func_gettimeofday_clobber=no \
+  "$SRC_DIR/gnutls-${GNUTLS_VER}/configure" \
+    --host="${TARGET_TRIPLE}" \
+    --prefix="$PREFIX" \
+    --enable-shared \
+    --disable-static \
+    --with-included-libtasn1 \
+    --with-included-unistring \
+    --without-p11-kit \
+    --without-tpm \
+    --without-tpm2 \
+    --without-libidn2 \
+    --without-zlib \
+    --without-brotli \
+    --without-zstd \
+    --disable-doc \
+    --disable-tools \
+    --disable-tests \
+    --disable-cxx \
+    --disable-guile \
+    --disable-libdane \
+    --disable-nls \
+    --disable-hardware-acceleration \
+    --disable-rpath
+
+  echo "==> Building GnuTLS"
+  make -j"$JOBS"
+  make install
+fi
+
+echo
+echo "=================================================="
+echo "✅ GnuTLS stack installed for Android (${APP_ABI})"
+echo "  GMP     .pc: $(ls -1 $PREFIX/lib/pkgconfig/gmp.pc 2>/dev/null || echo '(no pc file — uncommon for GMP)')"
+echo "  Nettle  .pc: $(ls -1 $PREFIX/lib/pkgconfig/nettle.pc 2>/dev/null || echo 'not found')"
+echo "  Hogweed .pc: $(ls -1 $PREFIX/lib/pkgconfig/hogweed.pc 2>/dev/null || echo 'not found')"
+echo "  GnuTLS  .pc: $(ls -1 $PREFIX/lib/pkgconfig/gnutls.pc 2>/dev/null || echo 'not found')"
+echo "  GnuTLS version: $(pkg-config --modversion gnutls 2>/dev/null || echo 'pkg-config not configured')"
+ls -l "$PREFIX/lib/"libgmp* "$PREFIX/lib/"libnettle* "$PREFIX/lib/"libhogweed* "$PREFIX/lib/"libgnutls* 2>/dev/null || true
+echo "=================================================="
