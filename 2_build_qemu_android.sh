@@ -49,8 +49,9 @@ export OBJCOPY="$TOOLCHAIN/bin/llvm-objcopy"
 export LD="$TOOLCHAIN/bin/ld.lld"
 
 # --- pkg-config strictly from our Android sysroot ---
+# share/pkgconfig is needed for header-only packages like spice-protocol.
 export PKG_CONFIG_PATH=""
-export PKG_CONFIG_LIBDIR="$PREFIX/lib/pkgconfig"
+export PKG_CONFIG_LIBDIR="$PREFIX/lib/pkgconfig:$PREFIX/share/pkgconfig"
 
 # tiny wrapper (explicit but simple)
 WRAP_PC="$BUILD_ROOT/android-pkg-config"
@@ -92,15 +93,53 @@ else
   echo "==> Using existing QEMU source directory (not a git repo): $QEMU_SRC"
 fi
 
+# --- Pre-fetch the slirp meson subproject so we can patch it before compile ---
+# subprojects/slirp is a meson "wrap" — on a fresh QEMU clone, the source
+# isn't on disk yet (only subprojects/slirp.wrap is). Meson would fetch it
+# at configure time, but our slirp_android_dns.patch must be applied *before*
+# compile, and the patch step below assumes the source already exists. So
+# materialise the slirp source up-front by reading the wrap file and cloning
+# the pinned revision directly. Idempotent: no-op if already fetched.
+SLIRP_WRAP="$QEMU_SRC/subprojects/slirp.wrap"
+SLIRP_DIR="$QEMU_SRC/subprojects/slirp"
+if [ ! -d "$SLIRP_DIR" ] && [ -f "$SLIRP_WRAP" ]; then
+  SLIRP_URL=$(sed -n 's/^url[[:space:]]*=[[:space:]]*//p' "$SLIRP_WRAP" | head -n1)
+  SLIRP_REV=$(sed -n 's/^revision[[:space:]]*=[[:space:]]*//p' "$SLIRP_WRAP" | head -n1)
+  if [ -n "$SLIRP_URL" ] && [ -n "$SLIRP_REV" ]; then
+    echo "==> Pre-fetching slirp subproject ($SLIRP_REV) from $SLIRP_URL ..."
+    git clone "$SLIRP_URL" "$SLIRP_DIR"
+    git -C "$SLIRP_DIR" checkout "$SLIRP_REV"
+  else
+    echo "==> WARN: could not parse url/revision from $SLIRP_WRAP; slirp patch will be skipped."
+  fi
+fi
+
 # --- Apply SLIRP Android DNS patch ---
 SLIRP_PATCH="$(cd "$(dirname "$0")" && pwd)/slirp_android_dns.patch"
 if [ -f "$SLIRP_PATCH" ]; then
   echo "==> Applying SLIRP Android DNS patch ..."
-  if git -C "$QEMU_SRC/subprojects/slirp" apply --check "$SLIRP_PATCH" 2>/dev/null; then
-    git -C "$QEMU_SRC/subprojects/slirp" apply "$SLIRP_PATCH"
+  if [ ! -d "$SLIRP_DIR" ]; then
+    echo "==> WARN: $SLIRP_DIR does not exist; cannot apply slirp patch."
+  elif git -C "$SLIRP_DIR" apply --check "$SLIRP_PATCH" 2>/dev/null; then
+    git -C "$SLIRP_DIR" apply "$SLIRP_PATCH"
     echo "==> SLIRP patch applied successfully."
+  elif git -C "$SLIRP_DIR" apply --check --reverse "$SLIRP_PATCH" 2>/dev/null; then
+    echo "==> SLIRP patch already applied, skipping."
   else
-    echo "==> SLIRP patch already applied or not needed, skipping."
+    echo "==> WARN: SLIRP patch does not apply cleanly to $SLIRP_DIR." >&2
+    exit 1
+  fi
+fi
+
+# --- Apply 9p Android stat-macro patch (needed when --enable-virtfs) ---
+NINEP_PATCH="$(cd "$(dirname "$0")" && pwd)/9p_android_stat_macros.patch"
+if [ -f "$NINEP_PATCH" ]; then
+  echo "==> Applying 9p Android stat-macro patch ..."
+  if git -C "$QEMU_SRC" apply --check "$NINEP_PATCH" 2>/dev/null; then
+    git -C "$QEMU_SRC" apply "$NINEP_PATCH"
+    echo "==> 9p stat-macro patch applied successfully."
+  else
+    echo "==> 9p stat-macro patch already applied or not needed, skipping."
   fi
 fi
 
@@ -291,14 +330,13 @@ cd "$BUILD_DIR"
   --disable-cocoa \
   --disable-curses \
   --disable-capstone \
-  --disable-gnutls \
+  --enable-gnutls \
   --disable-gcrypt \
-  --disable-libusb \
   --disable-usb-redir \
   --audio-drv-list= \
   --enable-slirp \
   --disable-vhost-user \
-  --disable-virtfs \
+  --enable-virtfs \
   -Dcoroutine_pool=false \
   --enable-libusb \
   --audio-drv-list=aaudio \
@@ -307,6 +345,7 @@ cd "$BUILD_DIR"
   -Dvnc=enabled \
   -Dvnc_jpeg=disabled \
   -Dvnc_sasl=disabled \
+  -Dspice=enabled \
   $PIXMAN_OPT \
   --target-list="aarch64-softmmu,i386-softmmu,x86_64-softmmu,ppc-softmmu"
 
@@ -352,6 +391,22 @@ for t in aarch64 i386 x86_64 ppc; do
   fi
 done
 
+# qemu-img gets the same PIE -> .so treatment: the app loads it via JNI
+# (libqemu-img-jni dlopen()s it and runs main() in a forked child) because
+# exec()ing binaries from writable app storage is blocked on modern Android.
+imgbin="$PREFIX/bin/qemu-img"
+if [ -f "$imgbin" ]; then
+  imgso="$PREFIX/lib/libqemu-img.so"
+  echo "[fallback-as-design] converting qemu-img -> libqemu-img.so"
+  cp -f "$imgbin" "$imgso"
+  safe_strip_debug "$imgso"
+  cp -f "$imgso" "$PREFIX/jniLibs/arm64-v8a/"
+  echo "Staged: libqemu-img.so (from bin; full dynsym preserved)"
+else
+  echo "[warn] missing $imgbin"
+  missing=1
+fi
+
 # --- Verify: ALL globals are exported (sample check) ---
 echo "==> Verifying dynsym exposure ..."
 rc=0
@@ -363,6 +418,15 @@ for lib in "$PREFIX/lib"/libqemu-system-*.so; do
   fi
   echo "    dynsym count: $($NM -D --defined-only "$lib" | wc -l)"
 done
+
+# libqemu-img.so: the app's JNI bridge dlsym()s exactly one symbol — main.
+if [ -f "$PREFIX/lib/libqemu-img.so" ]; then
+  echo "  * libqemu-img.so"
+  if ! $NM -D --defined-only "$PREFIX/lib/libqemu-img.so" | grep -E ' main$' >/dev/null; then
+    echo "    [error] 'main' not exported in dynsym — the JNI bridge cannot run it"
+    rc=1
+  fi
+fi
 
 echo "=================================================="
 echo "✅ Build & stage complete. Check outputs:"

@@ -1,0 +1,22 @@
+diff --git a/fsdev/9p-marshal.h b/fsdev/9p-marshal.h
+index f1abbe1..aea497f 100644
+--- a/fsdev/9p-marshal.h
++++ b/fsdev/9p-marshal.h
+@@ -1,6 +1,17 @@
+ #ifndef QEMU_9P_MARSHAL_H
+ #define QEMU_9P_MARSHAL_H
+ 
++/*
++ * Android NDK's <sys/stat.h> defines st_atime_nsec / st_mtime_nsec /
++ * st_ctime_nsec as macros that expand to st_atim.tv_nsec etc. These
++ * collide with the V9fsStatDotl struct field names below. Undefine
++ * them here; 9pfs code accesses the system stat struct via the
++ * underlying st_atim.tv_nsec form directly, not via these macros.
++ */
++#undef st_atime_nsec
++#undef st_mtime_nsec
++#undef st_ctime_nsec
++
+ #include "p9array.h"
+ 
+ typedef struct V9fsString {
