@@ -2,3 +2,6 @@
 /opt/
 .DS_Store
 /.vscode/
+# Build logs (tee'd from script runs — regenerated each invocation)
+*.log
+/logs/
