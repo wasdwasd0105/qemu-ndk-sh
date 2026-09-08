@@ -63,6 +63,54 @@ copy_lib "$SYS_LIB/libpixman-1.so"      "$LIB_OUT/libpixman-1.so"
 [ -f "$SYS_LIB/libffi.so" ]           && copy_lib "$SYS_LIB/libffi.so"           "$LIB_OUT/libffi.so"
 [ -f "$SYS_LIB/libusb-1.0.so" ]      && copy_lib "$SYS_LIB/libusb-1.0.so"      "$LIB_OUT/libusb-1.0.so"
 
+# SPICE stack (built by 1b_build_spice_deps.sh). Optional — copied only if present.
+# spice-server pulls openssl, libjpeg-turbo, and opus; ship them all as unversioned .so.
+[ -f "$SYS_LIB/libspice-server.so" ] && copy_lib "$SYS_LIB/libspice-server.so" "$LIB_OUT/libspice-server.so"
+[ -f "$SYS_LIB/libssl.so" ]          && copy_lib "$SYS_LIB/libssl.so"          "$LIB_OUT/libssl.so"
+[ -f "$SYS_LIB/libcrypto.so" ]       && copy_lib "$SYS_LIB/libcrypto.so"       "$LIB_OUT/libcrypto.so"
+[ -f "$SYS_LIB/libjpeg.so" ]         && copy_lib "$SYS_LIB/libjpeg.so"         "$LIB_OUT/libjpeg.so"
+[ -f "$SYS_LIB/libopus.so" ]         && copy_lib "$SYS_LIB/libopus.so"         "$LIB_OUT/libopus.so"
+
+# SPICE CLIENT stack (built by 1c_build_spice_client_deps.sh). Optional.
+# The Android app loads libspice-client-glib-2.0.so via JNI to connect to
+# QEMU's spice-server. json-glib is its only new dep we don't already ship.
+[ -f "$SYS_LIB/libspice-client-glib-2.0.so" ] && copy_lib "$SYS_LIB/libspice-client-glib-2.0.so" "$LIB_OUT/libspice-client-glib-2.0.so"
+[ -f "$SYS_LIB/libjson-glib-1.0.so" ]         && copy_lib "$SYS_LIB/libjson-glib-1.0.so"         "$LIB_OUT/libjson-glib-1.0.so"
+
+# WebDAV / folder-sharing stack (1e_build_webdav_deps.sh). Optional. Pulled in
+# by spice-gtk's webdav channel: spice-client-glib → libphodav → libsoup-3
+# → libxml2 / libpsl / libnghttp2 / libsqlite3.
+for wl in libphodav-3.0 libsoup-3.0 libxml2 libpsl libnghttp2 libsqlite3; do
+  [ -f "$SYS_LIB/$wl.so" ] && copy_lib "$SYS_LIB/$wl.so" "$LIB_OUT/$wl.so"
+done
+
+# GStreamer stack (built by 1d_build_gstreamer_for_android.sh). Optional.
+# gst-plugins-base installs multiple libs (app/audio/video/tag/pbutils/rtp/
+# rtsp/sdp/fft/riff) — copy any we find with the libgst*.so glob.
+for gst_so in "$SYS_LIB"/libgst*.so; do
+  [ -f "$gst_so" ] || continue
+  copy_lib "$gst_so" "$LIB_OUT/$(basename "$gst_so")"
+done
+
+# libc++_shared.so — spice-server has C++ code (red::shared_ptr_counted etc.)
+# and links against the NDK's shared libc++. Ship it from the NDK sysroot so
+# the dynamic loader can resolve it inside the APK.
+case "$ABI" in
+  arm64-v8a)   NDK_TRIPLE=aarch64-linux-android ;;
+  armeabi-v7a) NDK_TRIPLE=arm-linux-androideabi ;;
+  x86)         NDK_TRIPLE=i686-linux-android ;;
+  x86_64)      NDK_TRIPLE=x86_64-linux-android ;;
+esac
+NDK_HOST_TAG="$(uname -s | tr '[:upper:]' '[:lower:]')-x86_64"
+NDK_LIBCXX="$NDK_PATH/toolchains/llvm/prebuilt/$NDK_HOST_TAG/sysroot/usr/lib/$NDK_TRIPLE/libc++_shared.so"
+[ -f "$NDK_LIBCXX" ] && copy_lib "$NDK_LIBCXX" "$LIB_OUT/libc++_shared.so"
+
+# GnuTLS stack (for VNC TLS x509 credentials). Optional — copied only if present.
+[ -f "$SYS_LIB/libgnutls.so" ]  && copy_lib "$SYS_LIB/libgnutls.so"  "$LIB_OUT/libgnutls.so"
+[ -f "$SYS_LIB/libnettle.so" ]  && copy_lib "$SYS_LIB/libnettle.so"  "$LIB_OUT/libnettle.so"
+[ -f "$SYS_LIB/libhogweed.so" ] && copy_lib "$SYS_LIB/libhogweed.so" "$LIB_OUT/libhogweed.so"
+[ -f "$SYS_LIB/libgmp.so" ]     && copy_lib "$SYS_LIB/libgmp.so"     "$LIB_OUT/libgmp.so"
+
 # 2) Stage libqemu-system-*.so from sysroot jniLibs into libs (all arches)
 for arch in $QEMU_ARCHES; do
   so_src="$JNI_LIB_DIR/libqemu-system-${arch}.so"
@@ -72,6 +120,13 @@ for arch in $QEMU_ARCHES; do
     echo "Skip missing $so_src"
   fi
 done
+
+# qemu-img as a JNI-loadable .so (PIE renamed by 2_build_qemu_android.sh)
+if [ -f "$JNI_LIB_DIR/libqemu-img.so" ]; then
+  copy_lib "$JNI_LIB_DIR/libqemu-img.so" "$LIB_OUT/libqemu-img.so"
+else
+  echo "Skip missing $JNI_LIB_DIR/libqemu-img.so"
+fi
 
 for arch in $QEMU_ARCHES; do
   exe="$SYS_BIN/qemu-system-$arch"
@@ -110,6 +165,110 @@ rn libintl.so.8        libintl.so        "$LIB_OUT/libglib-2.0.so"
 rn libglib-2.0.so.0    libglib-2.0.so    "$LIB_OUT/libslirp.so"
 rn libintl.so.8        libintl.so        "$LIB_OUT/libslirp.so"
 
+# GnuTLS stack: rewrite versioned NEEDED entries inside the libs themselves
+# so that libgnutls.so finds the unversioned libnettle.so / libhogweed.so / libgmp.so
+# we ship next to it, instead of looking for libnettle.so.8 etc. on the device.
+rn libnettle.so.8      libnettle.so      "$LIB_OUT/libgnutls.so"
+rn libhogweed.so.6     libhogweed.so     "$LIB_OUT/libgnutls.so"
+rn libgmp.so.10        libgmp.so         "$LIB_OUT/libgnutls.so"
+
+rn libnettle.so.8      libnettle.so      "$LIB_OUT/libhogweed.so"
+rn libgmp.so.10        libgmp.so         "$LIB_OUT/libhogweed.so"
+
+# SPICE stack: rewrite versioned NEEDED entries inside libspice-server.so so it
+# resolves the unversioned .so files we ship next to it. openssl 3.x SONAMEs
+# are libssl.so.3 / libcrypto.so.3; libjpeg-turbo's is libjpeg.so.62; opus's
+# is libopus.so.0; pixman's is libpixman-1.so.0.
+if [ -f "$LIB_OUT/libspice-server.so" ]; then
+  rn libssl.so.3         libssl.so         "$LIB_OUT/libspice-server.so"
+  rn libcrypto.so.3      libcrypto.so      "$LIB_OUT/libspice-server.so"
+  rn libjpeg.so.62       libjpeg.so        "$LIB_OUT/libspice-server.so"
+  rn libopus.so.0        libopus.so        "$LIB_OUT/libspice-server.so"
+  rn libglib-2.0.so.0    libglib-2.0.so    "$LIB_OUT/libspice-server.so"
+  rn libgio-2.0.so.0     libgio-2.0.so     "$LIB_OUT/libspice-server.so"
+  rn libgobject-2.0.so.0 libgobject-2.0.so "$LIB_OUT/libspice-server.so"
+  rn libpixman-1.so.0    libpixman-1.so    "$LIB_OUT/libspice-server.so"
+fi
+# libssl depends on libcrypto via versioned soname.
+[ -f "$LIB_OUT/libssl.so" ] && rn libcrypto.so.3 libcrypto.so "$LIB_OUT/libssl.so"
+
+# SPICE client: rewrite versioned NEEDED inside libspice-client-glib-2.0.so
+# and libjson-glib-1.0.so. Same pattern as libspice-server.so above.
+if [ -f "$LIB_OUT/libspice-client-glib-2.0.so" ]; then
+  rn libjson-glib-1.0.so.0 libjson-glib-1.0.so "$LIB_OUT/libspice-client-glib-2.0.so"
+  rn libglib-2.0.so.0      libglib-2.0.so      "$LIB_OUT/libspice-client-glib-2.0.so"
+  rn libgio-2.0.so.0       libgio-2.0.so       "$LIB_OUT/libspice-client-glib-2.0.so"
+  rn libgobject-2.0.so.0   libgobject-2.0.so   "$LIB_OUT/libspice-client-glib-2.0.so"
+  rn libpixman-1.so.0      libpixman-1.so      "$LIB_OUT/libspice-client-glib-2.0.so"
+  rn libssl.so.3           libssl.so           "$LIB_OUT/libspice-client-glib-2.0.so"
+  rn libcrypto.so.3        libcrypto.so        "$LIB_OUT/libspice-client-glib-2.0.so"
+  rn libjpeg.so.62         libjpeg.so          "$LIB_OUT/libspice-client-glib-2.0.so"
+  rn libopus.so.0          libopus.so          "$LIB_OUT/libspice-client-glib-2.0.so"
+  rn libintl.so.8          libintl.so          "$LIB_OUT/libspice-client-glib-2.0.so"
+fi
+if [ -f "$LIB_OUT/libjson-glib-1.0.so" ]; then
+  rn libglib-2.0.so.0    libglib-2.0.so    "$LIB_OUT/libjson-glib-1.0.so"
+  rn libgio-2.0.so.0     libgio-2.0.so     "$LIB_OUT/libjson-glib-1.0.so"
+  rn libgobject-2.0.so.0 libgobject-2.0.so "$LIB_OUT/libjson-glib-1.0.so"
+fi
+
+# WebDAV stack: rewrite versioned NEEDED to the unversioned .so we ship.
+# (Rewrites for already-unversioned entries are harmless no-ops.)
+if [ -f "$LIB_OUT/libspice-client-glib-2.0.so" ]; then
+  rn libphodav-3.0.so.0  libphodav-3.0.so  "$LIB_OUT/libspice-client-glib-2.0.so"
+  rn libsoup-3.0.so.0    libsoup-3.0.so    "$LIB_OUT/libspice-client-glib-2.0.so"
+fi
+if [ -f "$LIB_OUT/libphodav-3.0.so" ]; then
+  rn libsoup-3.0.so.0    libsoup-3.0.so    "$LIB_OUT/libphodav-3.0.so"
+  rn libxml2.so.2        libxml2.so        "$LIB_OUT/libphodav-3.0.so"
+  rn libglib-2.0.so.0    libglib-2.0.so    "$LIB_OUT/libphodav-3.0.so"
+  rn libgio-2.0.so.0     libgio-2.0.so     "$LIB_OUT/libphodav-3.0.so"
+  rn libgobject-2.0.so.0 libgobject-2.0.so "$LIB_OUT/libphodav-3.0.so"
+fi
+if [ -f "$LIB_OUT/libsoup-3.0.so" ]; then
+  rn libintl.so.8        libintl.so        "$LIB_OUT/libsoup-3.0.so"
+  rn libpsl.so.5         libpsl.so         "$LIB_OUT/libsoup-3.0.so"
+  rn libsqlite3.so.0     libsqlite3.so     "$LIB_OUT/libsoup-3.0.so"
+  rn libnghttp2.so.14    libnghttp2.so     "$LIB_OUT/libsoup-3.0.so"
+  rn libglib-2.0.so.0    libglib-2.0.so    "$LIB_OUT/libsoup-3.0.so"
+  rn libgio-2.0.so.0     libgio-2.0.so     "$LIB_OUT/libsoup-3.0.so"
+  rn libgobject-2.0.so.0 libgobject-2.0.so "$LIB_OUT/libsoup-3.0.so"
+  rn libgmodule-2.0.so.0 libgmodule-2.0.so "$LIB_OUT/libsoup-3.0.so"
+fi
+if [ -f "$LIB_OUT/libpsl.so" ]; then
+  rn libintl.so.8        libintl.so        "$LIB_OUT/libpsl.so"
+fi
+if [ -f "$LIB_OUT/libxml2.so" ]; then
+  rn libintl.so.8        libintl.so        "$LIB_OUT/libxml2.so"
+fi
+
+# GStreamer libs cross-link with each other via versioned SONAMEs
+# (libgstreamer-1.0.so.0, etc). Rewrite to unversioned in every libgst*.so
+# and in libspice-client-glib (which links against gstreamer-{1.0,base,app,
+# audio,video}).
+GST_VERSIONED_LIBS="libgstreamer-1.0 libgstbase-1.0 libgstcontroller-1.0 \
+                   libgstnet-1.0 libgstapp-1.0 libgstaudio-1.0 libgstvideo-1.0 \
+                   libgsttag-1.0 libgstpbutils-1.0 libgstrtp-1.0 \
+                   libgstrtsp-1.0 libgstsdp-1.0 libgstfft-1.0 libgstriff-1.0"
+for gst_so in "$LIB_OUT"/libgst*.so; do
+  [ -f "$gst_so" ] || continue
+  for verlib in $GST_VERSIONED_LIBS; do
+    rn "${verlib}.so.0" "${verlib}.so" "$gst_so"
+  done
+  rn libglib-2.0.so.0    libglib-2.0.so    "$gst_so"
+  rn libgio-2.0.so.0     libgio-2.0.so     "$gst_so"
+  rn libgobject-2.0.so.0 libgobject-2.0.so "$gst_so"
+  rn libgmodule-2.0.so.0 libgmodule-2.0.so "$gst_so"
+  # gst-plugins-base's audio/pbutils/tag pull libintl directly; rewrite to
+  # match the unversioned libintl.so we ship.
+  rn libintl.so.8        libintl.so        "$gst_so"
+done
+if [ -f "$LIB_OUT/libspice-client-glib-2.0.so" ]; then
+  for verlib in libgstreamer-1.0 libgstbase-1.0 libgstapp-1.0 libgstaudio-1.0 libgstvideo-1.0; do
+    rn "${verlib}.so.0" "${verlib}.so" "$LIB_OUT/libspice-client-glib-2.0.so"
+  done
+fi
+
 # 4a) Rewrite NEEDED on all libqemu-system-*.so to unversioned names
 for arch in $QEMU_ARCHES; do
   so="$LIB_OUT/libqemu-system-${arch}.so"
@@ -122,7 +281,17 @@ for arch in $QEMU_ARCHES; do
   rn libgmodule-2.0.so.0   libgmodule-2.0.so   "$so"
   rn libintl.so.8          libintl.so          "$so"
   rn libusb-1.0.so.0       libusb-1.0.so       "$so"
+  rn libgnutls.so.30       libgnutls.so        "$so"
+  rn libspice-server.so.1  libspice-server.so  "$so"
 done
+
+# 4b) Same for libqemu-img.so (NEEDED: z, gnutls, glib, m, c)
+if [ -f "$LIB_OUT/libqemu-img.so" ]; then
+  echo "Patching NEEDED entries in libqemu-img.so"
+  rn libglib-2.0.so.0 libglib-2.0.so "$LIB_OUT/libqemu-img.so"
+  rn libintl.so.8     libintl.so     "$LIB_OUT/libqemu-img.so"
+  rn libgnutls.so.30  libgnutls.so   "$LIB_OUT/libqemu-img.so"
+fi
 
 # 5) Rewrite NEEDED on each QEMU executable/tool to point at unversioned libs
 for arch in $QEMU_ARCHES; do
@@ -135,7 +304,9 @@ for arch in $QEMU_ARCHES; do
   rn libglib-2.0.so.0    libglib-2.0.so    "$exe"
   rn libgmodule-2.0.so.0 libgmodule-2.0.so "$exe"
   rn libintl.so.8        libintl.so        "$exe"
-  rn libusb-1.0.so.0       libusb-1.0.so       "$so"
+  rn libusb-1.0.so.0       libusb-1.0.so       "$exe"
+  rn libgnutls.so.30       libgnutls.so        "$exe"
+  rn libspice-server.so.1  libspice-server.so  "$exe"
 done
 for tool in $QEMU_TOOLS; do
   exe="$BIN_OUT/$tool"
